@@ -6,7 +6,6 @@ import random
 import time
 import threading
 
-# --- OCR 및 화면 캡처 관련 라이브러리 ---
 import pytesseract
 from PIL import Image
 import mss
