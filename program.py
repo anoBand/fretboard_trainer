@@ -6,16 +6,17 @@ import random
 import time
 import threading
 
+# --- OCR 및 화면 캡처 관련 라이브러리 ---
 import pytesseract
 from PIL import Image
 import mss
-from pynput import mouse
+# pynput은 이제 사용하지 않으므로 제거해도 됩니다.
 
 # --- 설정 (Configuration) ---
 # Windows 사용자의 경우, Tesseract 설치 경로를 지정해야 합니다.
 # 예: pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 # 아래 주석을 풀고 자신의 경로에 맞게 수정하세요.
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe" 
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 CONFIG_FILE = "config.json"
 
@@ -78,7 +79,6 @@ class FretboardTrainer:
                 self.info_label.config(text="트레이너가 실행 중입니다.")
                 self.status_label.config(text="")
                 
-                # 별도의 스레드에서 OCR 루프 실행
                 self.ocr_thread = threading.Thread(target=self.ocr_loop, daemon=True)
                 self.ocr_thread.start()
                 
@@ -94,6 +94,7 @@ class FretboardTrainer:
 
     def next_problem(self):
         """다음 문제를 출제합니다."""
+        if not self.is_running: return
         self.current_string = random.choice(self.strings)
         self.current_note_pair = random.choice(self.notes)
         problem_text = f"{self.current_string}, {self.current_note_pair[0]}"
@@ -104,24 +105,30 @@ class FretboardTrainer:
         """지정된 영역을 지속적으로 캡처하고 OCR을 수행합니다."""
         with mss.mss() as sct:
             while self.is_running:
-                # 캡처 및 이미지 처리
                 sct_img = sct.grab(self.capture_coords)
                 img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                
-                # 이미지 전처리 (흑백, 이진화) - OCR 정확도 향상
                 img = img.convert('L')
                 img = img.point(lambda x: 0 if x < 128 else 255, '1')
 
-                # OCR 실행
                 try:
-                    # --psm 7: 이미지를 한 줄의 텍스트로 취급
-                    custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFG#b'
+                    custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFG#b/'
                     recognized_text = pytesseract.image_to_string(img, config=custom_config).strip()
                     
-                    # 정답 확인
+                    # === ✨ [개선 2] 음이름 인식 로직 확장 ===
+                    is_correct = False
+                    # 1. 직접 일치 확인 (예: "A#"가 ("A#", "Bb") 안에 있는지)
                     if recognized_text in self.current_note_pair:
+                        is_correct = True
+                    # 2. 복합 표기 확인 (예: "A#/Bb"가 문제일 때)
+                    elif len(self.current_note_pair) > 1:
+                        note1, note2 = self.current_note_pair
+                        # 인식된 텍스트 안에 두 음이 모두 포함되어 있는지 확인
+                        if note1 in recognized_text and note2 in recognized_text:
+                            is_correct = True
+                    
+                    if is_correct:
                         self.root.after(0, self.on_correct_answer)
-                        time.sleep(1) # 정답 표시 후 잠시 대기
+                        time.sleep(1) 
 
                 except pytesseract.TesseractNotFoundError:
                     self.root.after(0, self.show_tesseract_error)
@@ -130,43 +137,58 @@ class FretboardTrainer:
                 except Exception as e:
                     print(f"OCR Error: {e}")
 
-                time.sleep(0.1) # 확인 주기 (0.1초)
+                time.sleep(0.1)
 
     def on_correct_answer(self):
         """정답일 때 GUI를 업데이트하는 함수"""
         self.status_label.config(text="정답!", fg="green")
         self.root.update_idletasks()
-        self.root.after(1000, self.next_problem) # 1초 후 다음 문제 출제
+        self.root.after(1000, self.next_problem)
 
+    def on_closing(self):
+        self.is_running = False
+        self.root.destroy()
+        
+    def show_tesseract_error(self):
+        messagebox.showerror("Tesseract 오류", "Tesseract-OCR이 설치되지 않았거나 경로가 지정되지 않았습니다.\n코드 상단의 경로 설정을 확인해주세요.")
+
+    # === ✨ [개선 1] 캡처 영역 시각화 로직 ===
     def setup_capture_region(self):
         """사용자가 마우스로 캡처 영역을 설정하도록 안내합니다."""
         messagebox.showinfo("최초 설정", "튜너의 음이름이 표시되는 영역을 마우스로 드래그하여 지정합니다.\n'확인'을 누른 후, 화면 왼쪽 위에서 클릭을 시작하여 오른쪽 아래로 드래그하세요.")
         
-        # 설정 창 생성
         self.setup_window = tk.Toplevel(self.root)
         self.setup_window.attributes("-fullscreen", True)
-        self.setup_window.attributes("-alpha", 0.3) # 반투명
-        self.setup_window.wait_visibility(self.setup_window)
+        self.setup_window.attributes("-alpha", 0.3)
+        self.setup_window.attributes("-topmost", True) # 항상 위에 있도록
         
+        self.canvas = tk.Canvas(self.setup_window, cursor="cross", bg="grey")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
         self.start_x, self.start_y = None, None
         self.rect = None
 
-        self.setup_window.bind("<ButtonPress-1>", self.on_mouse_press)
-        self.setup_window.bind("<B1-Motion>", self.on_mouse_drag)
-        self.setup_window.bind("<ButtonRelease-1>", self.on_mouse_release)
+        self.canvas.bind("<ButtonPress-1>", self.on_mouse_press)
+        self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_mouse_release)
 
     def on_mouse_press(self, event):
-        self.start_x = event.x
-        self.start_y = event.y
+        self.start_x = self.canvas.canvasx(event.x)
+        self.start_y = self.canvas.canvasy(event.y)
+        if self.rect:
+            self.canvas.delete(self.rect)
+        self.rect = self.canvas.create_rectangle(self.start_x, self.start_y, self.start_x, self.start_y, outline='red', width=2)
 
     def on_mouse_drag(self, event):
-        pass # 드래그 시 시각적 효과는 생략하여 단순화
+        cur_x = self.canvas.canvasx(event.x)
+        cur_y = self.canvas.canvasy(event.y)
+        self.canvas.coords(self.rect, self.start_x, self.start_y, cur_x, cur_y)
 
     def on_mouse_release(self, event):
-        end_x, end_y = event.x, event.y
+        end_x = self.canvas.canvasx(event.x)
+        end_y = self.canvas.canvasy(event.y)
         self.setup_window.destroy()
 
-        # 좌표 정렬 (왼쪽-위 -> 오른쪽-아래)
         left = min(self.start_x, end_x)
         top = min(self.start_y, end_y)
         right = max(self.start_x, end_x)
@@ -174,9 +196,10 @@ class FretboardTrainer:
 
         if right - left < 10 or bottom - top < 10:
              messagebox.showwarning("설정 오류", "영역이 너무 작습니다. 다시 시도해주세요.")
+             self.capture_coords = None
              return
 
-        self.capture_coords = {"top": top, "left": left, "width": right - left, "height": bottom - top}
+        self.capture_coords = {"top": int(top), "left": int(left), "width": int(right - left), "height": int(bottom - top)}
         
         with open(CONFIG_FILE, 'w') as f:
             json.dump(self.capture_coords, f)
@@ -184,13 +207,6 @@ class FretboardTrainer:
         messagebox.showinfo("설정 완료", f"캡처 영역이 저장되었습니다: {self.capture_coords}\n프로그램을 시작합니다.")
         self.load_config()
         self.start()
-
-    def show_tesseract_error(self):
-        messagebox.showerror("Tesseract 오류", "Tesseract-OCR이 설치되지 않았거나 경로가 지정되지 않았습니다.\n코드 상단의 경로 설정을 확인해주세요.")
-
-    def on_closing(self):
-        self.is_running = False
-        self.root.destroy()
 
 
 if __name__ == "__main__":
